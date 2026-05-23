@@ -40,10 +40,10 @@ const AllocationMap = () => {
         // Extract disasters from stored results
         const disasters = (data.disasters || []).map((d) => ({
           id: d.id,
-          latitude: d.latitude,
-          longitude: d.longitude,
-          lat: d.latitude,
-          lng: d.longitude,
+          lat: d.lat || d.latitude,
+          lng: d.lng || d.longitude,
+          latitude: d.lat || d.latitude,
+          longitude: d.lng || d.longitude,
           disasterType: (d.disaster_type || '').replace(/_/g, ' '),
           severity: d.severity,
           address: d.address || d.location_text || `Disaster #${d.id}`,
@@ -54,8 +54,8 @@ const AllocationMap = () => {
         // Extract resources from stored results
         const resources = (data.resources || []).map((r) => ({
           id: r.id,
-          lat: r.latitude,
-          lng: r.longitude,
+          lat: r.lat || r.latitude,
+          lng: r.lng || r.longitude,
           name: r.name,
           type: r.resource_type,
           capacity: r.capacity,
@@ -176,6 +176,18 @@ const AllocationMap = () => {
                 connections={connections}
                 height="600px"
                 animated={true}
+                stats={optimizationData ? (() => {
+                  const primary = optimizationData.qaoa || optimizationData.dijkstra || optimizationData.greedy;
+                  const r = primary?.result;
+                  if (!r) return null;
+                  const algoName = optimizationData.qaoa ? 'Quantum QAOA' : optimizationData.dijkstra ? 'Dijkstra' : 'Greedy';
+                  return {
+                    coverage: r.coverage_percentage?.toFixed(1),
+                    distance: ((r.total_distance || 0) / 1000).toFixed(1) + ' km',
+                    time: ((r.total_time || 0) / 60).toFixed(0) + ' min',
+                    algorithm: algoName,
+                  };
+                })() : null}
               />
             )}
           </motion.div>

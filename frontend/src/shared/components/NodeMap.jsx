@@ -112,6 +112,7 @@ const NodeMap = ({
   showLegend = true,
   animated = true,
   themeColor = 'red',
+  stats = null,
 }) => {
   const [selectedNode, setSelectedNode] = useState(null);
 
@@ -274,7 +275,7 @@ const NodeMap = ({
           </div>
           
           <div className="mt-4 pt-3 border-t border-dark-600">
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="grid grid-cols-3 gap-2 text-xs">
               <div className="text-center p-2 bg-dark-700/50 rounded-lg">
                 <div className="text-red-400 font-bold text-lg">{disasterNodes.length}</div>
                 <div className="text-dark-400">Disasters</div>
@@ -283,7 +284,27 @@ const NodeMap = ({
                 <div className="text-blue-400 font-bold text-lg">{resourceNodes.length}</div>
                 <div className="text-dark-400">Resources</div>
               </div>
+              <div className="text-center p-2 bg-dark-700/50 rounded-lg">
+                <div className="text-green-400 font-bold text-lg">{connections.length}</div>
+                <div className="text-dark-400">Routes</div>
+              </div>
             </div>
+            {stats && (
+              <div className="mt-3 pt-3 border-t border-dark-600 space-y-2 text-xs">
+                {stats.coverage != null && (
+                  <div className="flex justify-between"><span className="text-dark-400">Coverage</span><span className="text-green-400 font-bold">{stats.coverage}%</span></div>
+                )}
+                {stats.distance != null && (
+                  <div className="flex justify-between"><span className="text-dark-400">Distance</span><span className="text-white font-bold">{stats.distance}</span></div>
+                )}
+                {stats.time != null && (
+                  <div className="flex justify-between"><span className="text-dark-400">Est. Time</span><span className="text-white font-bold">{stats.time}</span></div>
+                )}
+                {stats.algorithm && (
+                  <div className="flex justify-between"><span className="text-dark-400">Algorithm</span><span className="text-purple-400 font-bold">{stats.algorithm}</span></div>
+                )}
+              </div>
+            )}
           </div>
         </motion.div>
       )}
