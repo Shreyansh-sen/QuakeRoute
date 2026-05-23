@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # Resource Discovery
     resource_search_radius_km: float = 15.0
+    resource_discovery_limit: int = 50  # Max resources to discover/use
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

@@ -2,6 +2,8 @@
 Graph service for building and managing the resource allocation graph.
 """
 
+import time
+
 from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,7 @@ from app.models.disaster import Disaster
 from app.models.graph_edge import GraphEdge
 from app.models.resource_center import ResourceCenter
 from app.services.route_service import route_service
+from app.integrations.osrm_client import osrm_client
 
 
 class GraphService:
@@ -49,6 +52,7 @@ class GraphService:
         resource_query = select(ResourceCenter)
         if resource_ids:
             resource_query = resource_query.where(ResourceCenter.id.in_(resource_ids))
+        resource_query = resource_query.limit(settings.resource_discovery_limit)
         resources = list(self.db.execute(resource_query).scalars().all())
         
         if not disasters:
@@ -135,11 +139,147 @@ class GraphService:
         include_geometry: bool,
         max_distance_km: float,
     ) -> list[GraphEdge]:
-        """Build edges between nodes using OSRM."""
+        """
+        Build edges between nodes using OSRM distance matrix (single API call).
+
+        Falls back to sequential route calls if the matrix call fails.
+        """
         edges = []
         max_distance_m = max_distance_km * 1000
-        
-        # Build edges from each disaster to nearby resources
+
+        # Build coordinate lists: disasters first, then resources
+        disaster_points = [(d.lat, d.lng) for d in disasters]
+        resource_points = [(r.lat, r.lng) for r in resources]
+
+        start_time = time.perf_counter()
+
+        try:
+            # Single OSRM table API call for all distances/durations
+            matrix = await osrm_client.get_distance_matrix(
+                sources=disaster_points,
+                destinations=resource_points,
+            )
+            matrix_ms = (time.perf_counter() - start_time) * 1000
+
+            logger.info(
+                f"Distance matrix computed in {matrix_ms:.0f}ms "
+                f"({len(disasters)} sources × {len(resources)} destinations)"
+            )
+
+            # Create edges from the matrix
+            for i, disaster in enumerate(disasters):
+                for j, resource in enumerate(resources):
+                    distance = matrix.distances[i][j]
+                    duration = matrix.durations[i][j]
+
+                    # Skip unreachable or too-far pairs
+                    if distance == float("inf") or distance > max_distance_m:
+                        continue
+
+                    weight = await route_service.calculate_edge_weight(
+                        distance_meters=distance,
+                        duration_seconds=duration,
+                        priority=disaster.priority,
+                    )
+
+                    edge = GraphEdge(
+                        source_disaster_id=disaster.id,
+                        target_resource_id=resource.id,
+                        distance_meters=distance,
+                        duration_seconds=duration,
+                        weight=weight,
+                        route_geometry=None,  # Matrix doesn't return geometry
+                        edge_type="disaster_to_resource",
+                    )
+
+                    self.db.add(edge)
+                    edges.append(edge)
+
+            # If geometry is needed, fetch routes only for the edges we kept
+            if include_geometry and edges:
+                logger.info(
+                    f"Fetching route geometry for {len(edges)} edges..."
+                )
+                await self._enrich_edges_with_geometry(edges, disasters, resources)
+
+        except Exception as e:
+            logger.warning(
+                f"Distance matrix failed ({e}), falling back to sequential routes"
+            )
+            edges = await self._build_edges_sequential(
+                disasters, resources, include_geometry, max_distance_km
+            )
+            return edges
+
+        self.db.commit()
+
+        for edge in edges:
+            self.db.refresh(edge)
+
+        total_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            f"Graph edges built: {len(edges)} edges in {total_ms:.0f}ms "
+            f"(matrix approach)"
+        )
+
+        return edges
+
+    async def _enrich_edges_with_geometry(
+        self,
+        edges: list[GraphEdge],
+        disasters: list[Disaster],
+        resources: list[ResourceCenter],
+    ) -> None:
+        """
+        Fetch route geometry for edges in parallel batches.
+
+        Uses asyncio.gather with concurrency limit to avoid
+        overwhelming the OSRM server.
+        """
+        import asyncio
+
+        disaster_map = {d.id: d for d in disasters}
+        resource_map = {r.id: r for r in resources}
+
+        BATCH_SIZE = 10  # concurrent requests per batch
+
+        async def fetch_geometry(edge: GraphEdge) -> None:
+            try:
+                d = disaster_map[edge.source_disaster_id]
+                r = resource_map[edge.target_resource_id]
+                route = await route_service.get_route(
+                    source_lat=d.lat,
+                    source_lng=d.lng,
+                    target_lat=r.lat,
+                    target_lng=r.lng,
+                    include_geometry=True,
+                )
+                edge.route_geometry = route.geometry
+            except Exception:
+                pass  # Geometry is optional
+
+        # Process in parallel batches
+        for i in range(0, len(edges), BATCH_SIZE):
+            batch = edges[i:i + BATCH_SIZE]
+            await asyncio.gather(*[fetch_geometry(e) for e in batch])
+
+        fetched = sum(1 for e in edges if e.route_geometry)
+        logger.info(
+            f"Geometry fetched for {fetched}/{len(edges)} edges "
+            f"(parallel batches of {BATCH_SIZE})"
+        )
+
+    async def _build_edges_sequential(
+        self,
+        disasters: list[Disaster],
+        resources: list[ResourceCenter],
+        include_geometry: bool,
+        max_distance_km: float,
+    ) -> list[GraphEdge]:
+        """Fallback: Build edges one-by-one (original approach)."""
+        edges = []
+        max_distance_m = max_distance_km * 1000
+
         for disaster in disasters:
             for resource in resources:
                 try:
@@ -150,18 +290,16 @@ class GraphService:
                         target_lng=resource.lng,
                         include_geometry=include_geometry,
                     )
-                    
-                    # Skip if distance exceeds maximum
+
                     if route.distance_meters > max_distance_m:
                         continue
-                    
-                    # Calculate edge weight
+
                     weight = await route_service.calculate_edge_weight(
                         distance_meters=route.distance_meters,
                         duration_seconds=route.duration_seconds,
                         priority=disaster.priority,
                     )
-                    
+
                     edge = GraphEdge(
                         source_disaster_id=disaster.id,
                         target_resource_id=resource.id,
@@ -171,22 +309,22 @@ class GraphService:
                         route_geometry=route.geometry if include_geometry else None,
                         edge_type="disaster_to_resource",
                     )
-                    
+
                     self.db.add(edge)
                     edges.append(edge)
-                    
+
                 except Exception as e:
                     logger.warning(
                         f"Failed to create edge from disaster {disaster.id} "
                         f"to resource {resource.id}: {e}"
                     )
                     continue
-        
+
         self.db.commit()
-        
+
         for edge in edges:
             self.db.refresh(edge)
-        
+
         return edges
 
     async def _clear_existing_edges(
