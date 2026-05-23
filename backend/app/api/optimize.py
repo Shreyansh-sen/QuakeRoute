@@ -9,6 +9,8 @@ from app.core.exceptions import OptimizationException
 from app.db import get_db
 from app.schemas.optimize import (
     AllocationStatus,
+    HAQRARequest,
+    HAQRAResponse,
     OptimizationAlgorithm,
     OptimizationRequest,
     OptimizationResponse,
@@ -121,6 +123,14 @@ def list_algorithms():
                 "available": True,
             },
             {
+                "id": OptimizationAlgorithm.HAQRA.value,
+                "name": "HAQRA",
+                "description": "Hybrid Adaptive Quantum-Ready Resource Allocation — "
+                "full multi-phase optimization with severity scoring, survival utility, "
+                "hybrid allocation, and routing optimization",
+                "available": True,
+            },
+            {
                 "id": OptimizationAlgorithm.MIN_COST_FLOW.value,
                 "name": "Min Cost Flow",
                 "description": "Optimal flow-based allocation (coming soon)",
@@ -134,3 +144,49 @@ def list_algorithms():
             },
         ]
     }
+
+
+@router.post("/haqra", response_model=HAQRAResponse)
+def run_haqra_optimization(
+    request: HAQRARequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Run HAQRA (Hybrid Adaptive Quantum-Ready Resource Allocation) optimization.
+
+    This is the full multi-phase optimization pipeline:
+    1. Dynamic severity scoring
+    2. Optimization graph construction
+    3. Feasible resource filtering
+    4. Global survival utility computation
+    5. Hybrid allocation (divisible + indivisible resources)
+    6. Routing optimization (A* + Dijkstra fallback)
+    7. Reoptimization monitoring
+    8. (Optional) Quantum QUBO preparation
+
+    Returns complete allocation plan with routes, ETAs, and shortages.
+    """
+    from app.optimization.haqra_pipeline import HAQRAPipeline, HAQRAConfig
+
+    config = HAQRAConfig(enable_quantum_prep=request.enable_quantum_prep)
+    pipeline = HAQRAPipeline(db=db, config=config)
+
+    try:
+        result = pipeline.run(disaster_ids=request.disaster_ids)
+
+        return HAQRAResponse(
+            allocations=result.allocations,
+            routes=result.routes,
+            eta_predictions=result.eta_predictions,
+            survival_utility_score=result.survival_utility_score,
+            resource_shortages=result.resource_shortages,
+            reroute_recommendations=result.reroute_recommendations,
+            unfulfilled_demands=result.unfulfilled_demands,
+            computation_time_ms=result.computation_time_ms,
+            severity_scores=result.severity_scores,
+            graph_stats=result.graph_stats,
+            metrics=result.metrics,
+        )
+    except OptimizationException as e:
+        raise HTTPException(status_code=500, detail=e.message)
+

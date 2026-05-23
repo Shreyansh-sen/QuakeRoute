@@ -149,9 +149,9 @@ class ResourceDiscoveryService:
                 details={"bbox": bbox},
             ) from e
         
-        # Store discovered resources
+        # Store discovered resources (respects RESOURCE_DISCOVERY_LIMIT)
         stored_resources = self._store_resources(osm_resources)
-        
+
         # Create GeoJSON for the search region
         region_geojson = {
             "type": "Feature",
@@ -177,61 +177,132 @@ class ResourceDiscoveryService:
         osm_resources: list[OSMResource],
     ) -> list[ResourceCenter]:
         """
-        Store discovered resources in database.
-        
-        Skips resources that already exist (by OSM ID).
-        
+        Store discovered resources in database, respecting the global limit.
+
+        - If DB already has >= limit resources, no new ones are saved.
+        - If DB has fewer, only enough new resources are added to reach the limit.
+        - Excess old resources beyond the limit are purged.
+
         Args:
             osm_resources: List of discovered OSM resources
             
         Returns:
-            List of stored ResourceCenter models
+            List of stored ResourceCenter models (up to the limit)
         """
-        # Get existing OSM IDs
+        from sqlalchemy import func, delete as sa_delete
+
+        discovery_limit = settings.resource_discovery_limit
+
+        # Count how many resources already exist in DB
+        existing_total = self.db.execute(
+            select(func.count()).select_from(ResourceCenter)
+        ).scalar() or 0
+
+        # If DB already exceeds or meets the limit, purge excess and return
+        if existing_total >= discovery_limit:
+            logger.info(
+                f"DB already has {existing_total} resources (limit={discovery_limit}). "
+                f"Purging excess and skipping new saves."
+            )
+            self._purge_excess_resources(discovery_limit)
+            query = select(ResourceCenter).order_by(
+                ResourceCenter.created_at.desc()
+            ).limit(discovery_limit)
+            return list(self.db.execute(query).scalars().all())
+
+        # How many new slots are available
+        slots_available = discovery_limit - existing_total
+
+        # Get existing OSM IDs to avoid duplicates
         existing_osm_ids_query = select(ResourceCenter.osm_id).where(
             ResourceCenter.osm_id.in_([r.osm_id for r in osm_resources])
         )
         existing_osm_ids = set(
             self.db.execute(existing_osm_ids_query).scalars().all()
         )
-        
-        # Filter out existing resources
+
+        # Filter out already-existing resources, then cap to available slots
         new_resources = [
             r for r in osm_resources if r.osm_id not in existing_osm_ids
         ]
-        
-        if not new_resources:
-            # Return existing resources matching the OSM IDs
-            query = select(ResourceCenter).where(
-                ResourceCenter.osm_id.in_([r.osm_id for r in osm_resources])
+        new_resources = new_resources[:slots_available]
+
+        if new_resources:
+            resource_centers = [
+                ResourceCenter(
+                    osm_id=r.osm_id,
+                    name=r.name,
+                    lat=r.lat,
+                    lng=r.lng,
+                    resource_type=r.resource_type,
+                    address=r.address,
+                )
+                for r in new_resources
+            ]
+
+            self.db.add_all(resource_centers)
+            self.db.commit()
+
+            for rc in resource_centers:
+                self.db.refresh(rc)
+
+            logger.info(
+                f"Saved {len(resource_centers)} new resources "
+                f"({existing_total} existed, limit={discovery_limit})"
             )
-            return list(self.db.execute(query).scalars().all())
-        
-        # Create new resource centers
-        resource_centers = [
-            ResourceCenter(
-                osm_id=r.osm_id,
-                name=r.name,
-                lat=r.lat,
-                lng=r.lng,
-                resource_type=r.resource_type,
-                address=r.address,
-            )
-            for r in new_resources
-        ]
-        
-        self.db.add_all(resource_centers)
-        self.db.commit()
-        
-        for rc in resource_centers:
-            self.db.refresh(rc)
-        
-        # Return all resources (new + existing)
-        all_osm_ids = [r.osm_id for r in osm_resources]
-        query = select(ResourceCenter).where(
-            ResourceCenter.osm_id.in_(all_osm_ids)
-        )
+
+        # Return all resources up to the limit
+        query = select(ResourceCenter).order_by(
+            ResourceCenter.created_at.desc()
+        ).limit(discovery_limit)
         return list(self.db.execute(query).scalars().all())
+
+    def _purge_excess_resources(self, limit: int) -> None:
+        """
+        Delete resources beyond the limit, keeping the most recent ones.
+        Only deletes resources that have no associated inventory or graph edges.
+        """
+        from sqlalchemy import func
+
+        total = self.db.execute(
+            select(func.count()).select_from(ResourceCenter)
+        ).scalar() or 0
+
+        if total <= limit:
+            return
+
+        excess = total - limit
+
+        # Get IDs of the oldest resources to delete
+        oldest_ids_query = select(ResourceCenter.id).order_by(
+            ResourceCenter.created_at.asc()
+        ).limit(excess)
+        oldest_ids = list(self.db.execute(oldest_ids_query).scalars().all())
+
+        if oldest_ids:
+            from app.models.graph_edge import GraphEdge
+            from sqlalchemy import delete as sa_delete
+
+            # Delete associated graph edges first
+            self.db.execute(
+                sa_delete(GraphEdge).where(
+                    (GraphEdge.target_resource_id.in_(oldest_ids)) |
+                    (GraphEdge.source_resource_id.in_(oldest_ids))
+                )
+            )
+
+            # Delete the excess resources
+            self.db.execute(
+                sa_delete(ResourceCenter).where(
+                    ResourceCenter.id.in_(oldest_ids)
+                )
+            )
+            self.db.commit()
+
+            logger.info(
+                f"Purged {len(oldest_ids)} excess resources "
+                f"(kept {limit} most recent)"
+            )
 
     def get_resources(
         self,
@@ -242,7 +313,8 @@ class ResourceDiscoveryService:
     ) -> tuple[list[ResourceCenter], int]:
         """
         Get resource centers with optional filtering.
-        
+        Total results are capped to RESOURCE_DISCOVERY_LIMIT.
+
         Args:
             resource_ids: Optional list of specific IDs
             resource_types: Optional list of resource types to filter
@@ -253,7 +325,9 @@ class ResourceDiscoveryService:
             Tuple of (resources list, total count)
         """
         from sqlalchemy import func
-        
+
+        discovery_limit = settings.resource_discovery_limit
+
         query = select(ResourceCenter)
         count_query = select(func.count()).select_from(ResourceCenter)
         
@@ -267,13 +341,17 @@ class ResourceDiscoveryService:
                 ResourceCenter.resource_type.in_(resource_types)
             )
         
-        total = self.db.execute(count_query).scalar() or 0
-        
+        raw_total = self.db.execute(count_query).scalar() or 0
+        # Cap total to the discovery limit
+        total = min(raw_total, discovery_limit)
+
         offset = (page - 1) * page_size
-        query = query.offset(offset).limit(page_size).order_by(
+        # Ensure we never go beyond the capped total
+        effective_limit = min(page_size, max(0, total - offset))
+        query = query.order_by(
             ResourceCenter.created_at.desc()
-        )
-        
+        ).offset(offset).limit(effective_limit)
+
         resources = list(self.db.execute(query).scalars().all())
         
         return resources, total

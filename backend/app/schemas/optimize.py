@@ -13,6 +13,7 @@ class OptimizationAlgorithm(str, Enum):
 
     DIJKSTRA = "dijkstra"
     GREEDY = "greedy"
+    HAQRA = "haqra"
     MIN_COST_FLOW = "min_cost_flow"
     QAOA = "qaoa"  # Future quantum
 
@@ -110,3 +111,36 @@ class ShortestPathResponse(BaseModel):
     total_distance: float
     total_duration: float
     edges: list[dict]
+
+
+class HAQRARequest(BaseModel):
+    """Schema for HAQRA optimization request."""
+
+    disaster_ids: list[int] | None = Field(
+        default=None,
+        description="Specific disaster IDs to optimize (all if None)",
+    )
+    enable_quantum_prep: bool = Field(
+        default=False,
+        description="Whether to prepare QAOA input (for future quantum execution)",
+    )
+
+
+class HAQRAResponse(BaseModel):
+    """Schema for HAQRA optimization response."""
+
+    allocations: list[dict[str, Any]]
+    routes: list[dict[str, Any]]
+    eta_predictions: list[dict[str, Any]]
+    survival_utility_score: float
+    resource_shortages: list[dict[str, Any]]
+    reroute_recommendations: list[dict[str, Any]]
+    unfulfilled_demands: dict[int, list[str]]
+    computation_time_ms: float
+    severity_scores: dict[int, float]
+    graph_stats: dict[str, Any]
+    metrics: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Detailed performance metrics per pipeline phase",
+    )
+
