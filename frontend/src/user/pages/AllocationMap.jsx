@@ -21,6 +21,7 @@ const AllocationMap = () => {
   const { currentRequestId, isComplete } = useAllocationStore();
 
   const [resourceNodes, setResourceNodes] = useState([]);
+  const [disasterList, setDisasterList] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [connections, setConnections] = useState([]);
   const [optimizationData, setOptimizationData] = useState(null);
@@ -30,43 +31,66 @@ const AllocationMap = () => {
     try {
       setIsLoading(true);
 
-      // Fetch optimization results from backend
+      // Fetch optimization results from backend (contains everything)
       const optResponse = await disasterService.getOptimizationResults();
       if (optResponse && optResponse.status === 'ready' && optResponse.result) {
-        setOptimizationData(optResponse.result);
-        const primary = optResponse.result.greedy || optResponse.result.dijkstra;
-        const result = primary ? primary.result : null;
+        const data = optResponse.result;
+        setOptimizationData(data);
 
+        // Extract disasters from stored results
+        const disasters = (data.disasters || []).map((d) => ({
+          id: d.id,
+          latitude: d.latitude,
+          longitude: d.longitude,
+          lat: d.latitude,
+          lng: d.longitude,
+          disasterType: (d.disaster_type || '').replace(/_/g, ' '),
+          severity: d.severity,
+          address: d.address || d.location_text || `Disaster #${d.id}`,
+          livesImpacted: d.affected_population || 0,
+        }));
+        setDisasterList(disasters);
+
+        // Extract resources from stored results
+        const resources = (data.resources || []).map((r) => ({
+          id: r.id,
+          lat: r.latitude,
+          lng: r.longitude,
+          name: r.name,
+          type: r.resource_type,
+          capacity: r.capacity,
+          inventoryAvailable: Object.values(r.inventory || {}).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0),
+          personnelAvailable: r.inventory?.doctors || r.inventory?.rescue_team || 0,
+        }));
+        setResourceNodes(resources);
+
+        // Build connections from best algorithm's allocations
+        const primary = data.qaoa || data.dijkstra || data.greedy;
+        const result = primary ? primary.result : null;
         if (result && result.allocations) {
-          // Build connections from allocations
           const newConnections = result.allocations.map((alloc) => ({
-            disasterId: alloc.disaster_id,
-            resourceId: alloc.resource_center_id,
-            resourceType: alloc.resource_type,
-            distance: alloc.distance_meters,
-            time: alloc.travel_time_seconds,
+            fromId: alloc.disaster_id,
+            toId: alloc.resource_center_id,
+            color: '#22c55e',
           }));
           setConnections(newConnections);
         }
-      }
-
-      // Also fetch resource centers from API
-      try {
-        const resources = await adminService.listResources();
-        const mapped = (resources || []).map((r) => ({
-          resourceId: r.id,
-          name: r.name,
-          type: r.resource_type,
-          distance: 'N/A',
-          estimatedArrival: 'N/A',
-          inventoryAvailable: Object.values(r.inventory || {}).reduce((a, b) => a + b, 0),
-          personnelAvailable: r.inventory?.doctors || r.inventory?.rescue_team || 0,
-          lat: r.latitude,
-          lng: r.longitude,
-        }));
-        setResourceNodes(mapped);
-      } catch (err) {
-        console.error('Failed to fetch resources:', err);
+      } else {
+        // Fallback: fetch resources directly
+        try {
+          const resp = await adminService.listResources();
+          const items = Array.isArray(resp) ? resp : (resp?.items || []);
+          setResourceNodes(items.map((r) => ({
+            id: r.id,
+            lat: r.latitude,
+            lng: r.longitude,
+            name: r.name,
+            type: r.resource_type,
+            capacity: r.capacity,
+          })));
+        } catch (err) {
+          console.error('Failed to fetch resources:', err);
+        }
       }
     } catch (error) {
       console.error('Failed to fetch allocation data:', error);
@@ -147,7 +171,7 @@ const AllocationMap = () => {
               <SkeletonLoader type="map" className="h-[600px]" />
             ) : (
               <NodeMap
-                disasterNodes={disasterNodes}
+                disasterNodes={disasterList}
                 resourceNodes={resourceNodes}
                 connections={connections}
                 height="600px"
@@ -172,7 +196,7 @@ const AllocationMap = () => {
                   <AlertTriangle className="w-4 h-4 text-red-400" />
                   <span className="text-dark-300">Disaster Zones</span>
                 </div>
-                <span className="text-red-400 font-bold">{disasterNodes.length}</span>
+                <span className="text-red-400 font-bold">{disasterList.length}</span>
               </div>
 
               <div className="flex items-center justify-between p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
@@ -207,12 +231,12 @@ const AllocationMap = () => {
               </h3>
             </div>
             <div className="max-h-48 overflow-y-auto">
-              {disasterNodes.map((node, index) => (
+              {disasterList.map((node, index) => (
                 <div
                   key={node.id || index}
                   className="p-3 border-b border-dark-700/50 last:border-0"
                 >
-                  <p className="text-white font-medium truncate">{node.disasterType}</p>
+                  <p className="text-white font-medium truncate capitalize">{node.disasterType}</p>
                   <p className="text-dark-400 text-sm truncate">{node.address}</p>
                   <div className="flex items-center gap-2 mt-1 text-xs text-dark-500">
                     <span>Severity: {node.severity}/10</span>
@@ -243,19 +267,15 @@ const AllocationMap = () => {
               ) : (
                 resourceNodes.map((resource, index) => (
                   <div
-                    key={resource.resourceId || index}
+                    key={resource.id || index}
                     className="p-3 border-b border-dark-700/50 last:border-0"
                   >
                     <p className="text-white font-medium truncate">{resource.name}</p>
-                    <div className="flex items-center gap-3 mt-1 text-xs text-dark-500">
-                      <span>{resource.distance}</span>
-                      <span>•</span>
-                      <span>ETA: {resource.estimatedArrival}</span>
-                    </div>
                     <div className="flex items-center gap-3 mt-1 text-xs text-dark-400">
-                      <span>{resource.inventoryAvailable} units</span>
-                      <span>•</span>
-                      <span>{resource.personnelAvailable} personnel</span>
+                      <span className="capitalize">{(resource.type || '').replace(/_/g, ' ')}</span>
+                      {resource.inventoryAvailable > 0 && (
+                        <><span>•</span><span>{resource.inventoryAvailable} units</span></>
+                      )}
                     </div>
                   </div>
                 ))
