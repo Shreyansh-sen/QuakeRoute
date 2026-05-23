@@ -7,7 +7,7 @@ const API_BASE_URL = 'http://localhost:8000/api/v1';
 // Create axios instance
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 60000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -18,14 +18,13 @@ const apiClient = axios.create({
 // ============================================
 
 export const disasterService = {
-  // Submit disaster report - Real API call
+  // Submit disaster report
   submitRequest: async (payload) => {
-    // Transform payload to match backend schema
     const requestBody = {
       disasters: payload.disasterNodes.map((node) => ({
         lat: node.latitude,
         lng: node.longitude,
-        disaster_type: node.disasterType?.toLowerCase().replace(' ', '_') || 'flood',
+        disaster_type: node.disasterType?.toLowerCase().replace(/\s+/g, '_') || 'flood',
         severity: node.severity,
         affected_population: node.livesImpacted || 0,
         priority: node.severity >= 8 ? 'critical' : node.severity >= 5 ? 'high' : 'medium',
@@ -37,9 +36,23 @@ export const disasterService = {
     return response.data;
   },
 
-  // Get allocation status
-  getAllocationStatus: async (requestId) => {
-    const response = await apiClient.get(`/allocation/status/${requestId}`);
+  // Get all disasters (for user to see their submitted ones)
+  listDisasters: async (page = 1, pageSize = 50) => {
+    const response = await apiClient.get('/disasters', {
+      params: { page, page_size: pageSize },
+    });
+    return response.data;
+  },
+
+  // Get a specific disaster by ID
+  getDisaster: async (disasterId) => {
+    const response = await apiClient.get(`/disasters/${disasterId}`);
+    return response.data;
+  },
+
+  // Poll for optimization results (from backend, cross-portal safe)
+  getOptimizationResults: async () => {
+    const response = await apiClient.get('/results/optimization');
     return response.data;
   },
 };
@@ -52,10 +65,7 @@ export const adminService = {
   // List all disasters with pagination
   listDisasters: async (page = 1, pageSize = 50) => {
     const response = await apiClient.get('/disasters', {
-      params: {
-        page,
-        page_size: pageSize,
-      },
+      params: { page, page_size: pageSize },
     });
     return response.data;
   },
@@ -69,26 +79,85 @@ export const adminService = {
     });
     return response.data;
   },
+
+  // List all resources
+  listResources: async (page = 1, pageSize = 100) => {
+    const response = await apiClient.get('/resources', {
+      params: { page, page_size: pageSize },
+    });
+    return response.data;
+  },
+
+  // Bulk update inventory for multiple resource centers
+  bulkUpdateInventory: async (updates) => {
+    const response = await apiClient.post('/admin/inventory/bulk', { updates });
+    return response.data;
+  },
+
+  // Build graph from disasters and resources
+  buildGraph: async (disasterIds = null, resourceIds = null) => {
+    const response = await apiClient.post('/graph/build', {
+      disaster_ids: disasterIds,
+      resource_ids: resourceIds,
+      include_route_geometry: true,
+      max_distance_km: 50,
+    });
+    return response.data;
+  },
+
+  // Run optimization
+  runOptimization: async (disasterIds = null, algorithm = 'greedy') => {
+    const response = await apiClient.post('/optimize', {
+      disaster_ids: disasterIds,
+      algorithm,
+      objective: 'balanced',
+      max_iterations: 1000,
+    });
+    return response.data;
+  },
+
+  // Store optimization results for cross-portal access
+  storeResults: async (payload) => {
+    const response = await apiClient.post('/results/optimization', payload);
+    return response.data;
+  },
+
+  // Get graph stats
+  getGraphStats: async () => {
+    const response = await apiClient.get('/graph/stats');
+    return response.data;
+  },
 };
 
 // ============================================
-// DASHBOARD SERVICES (kept for compatibility)
+// DASHBOARD SERVICES
 // ============================================
 
 export const dashboardService = {
   getStats: async () => {
-    return {
-      totalRequests: 0,
-      activeAllocations: 0,
-      availableResources: 0,
-      personnelAvailable: 0,
-      criticalZones: 0,
-      averageResponseTime: '0 min',
-    };
-  },
-
-  getCharts: async () => {
-    return {};
+    try {
+      const [disastersRes, resourcesRes] = await Promise.all([
+        apiClient.get('/disasters', { params: { page: 1, page_size: 1 } }),
+        apiClient.get('/resources', { params: { page: 1, page_size: 1 } }),
+      ]);
+      return {
+        totalRequests: disastersRes.data?.total || 0,
+        activeAllocations: 0,
+        availableResources: resourcesRes.data?.total || 0,
+        personnelAvailable: 0,
+        criticalZones: 0,
+        averageResponseTime: '—',
+      };
+    } catch {
+      return {
+        totalRequests: 0,
+        activeAllocations: 0,
+        availableResources: 0,
+        personnelAvailable: 0,
+        criticalZones: 0,
+        averageResponseTime: '—',
+      };
+    }
   },
 };
 

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { 
@@ -14,13 +15,20 @@ import {
 } from 'lucide-react';
 import { DashboardCard } from '@shared/components';
 import { staggerContainer, fadeInUp } from '@shared/constants';
+import { dashboardService } from '@api';
 
 const UserDashboard = () => {
+  const [stats, setStats] = useState(null);
+
+  useEffect(() => {
+    dashboardService.getStats().then(setStats).catch(() => {});
+  }, []);
+
   const quickStats = [
-    { title: 'Active Disasters', value: 12, icon: AlertTriangle, color: 'cyan', trend: 'up', trendValue: 8 },
-    { title: 'Lives Impacted', value: 15420, icon: Users, color: 'orange', trend: 'down', trendValue: 5 },
-    { title: 'Response Teams', value: 45, icon: Shield, color: 'green', trend: 'up', trendValue: 12 },
-    { title: 'Avg Response Time', value: '23 min', icon: Clock, color: 'blue' },
+    { title: 'Active Disasters', value: stats?.totalRequests ?? '—', icon: AlertTriangle, color: 'cyan' },
+    { title: 'Resources Available', value: stats?.availableResources ?? '—', icon: Shield, color: 'green' },
+    { title: 'Response Teams', value: stats?.personnelAvailable || '—', icon: Users, color: 'orange' },
+    { title: 'Avg Response Time', value: stats?.averageResponseTime || '—', icon: Clock, color: 'blue' },
   ];
 
   return (

@@ -311,6 +311,156 @@ class DijkstraOptimizer(BaseOptimizer):
         )
 
 
+class QAOASimulatedOptimizer(BaseOptimizer):
+    """
+    Simulated QAOA (Quantum Approximate Optimization Algorithm) optimizer.
+
+    Simulates quantum-inspired optimization by:
+    1. Using random perturbations (simulating quantum superposition)
+    2. Running multiple rounds (simulating QAOA layers/depth)
+    3. Selecting the globally best allocation across all rounds
+    """
+
+    @property
+    def algorithm(self) -> OptimizationAlgorithm:
+        return OptimizationAlgorithm.QAOA
+
+    def optimize(
+        self,
+        context: OptimizationContext,
+        max_iterations: int = 1000,
+    ) -> OptimizationOutput:
+        import math
+        import random
+
+        start_time = time.perf_counter()
+        random.seed(42)  # Reproducible
+
+        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        sorted_disasters = sorted(
+            context.disasters,
+            key=lambda d: (priority_order.get(d.priority, 4), -d.severity),
+        )
+
+        best_allocations: list[ResourceAllocation] = []
+        best_cost = float("inf")
+        best_distance = 0.0
+        best_time = 0.0
+        total_iterations = 0
+
+        num_rounds = min(max_iterations, 50)  # QAOA "layers"
+
+        for layer in range(num_rounds):
+            # Simulated annealing temperature (quantum tunneling analog)
+            temperature = 1.0 - (layer / num_rounds)
+            gamma = math.pi * temperature  # QAOA mixing angle
+            beta = math.pi * (1 - temperature) / 2  # QAOA phase angle
+
+            layer_allocations: list[ResourceAllocation] = []
+            layer_distance = 0.0
+            layer_time = 0.0
+
+            available = {
+                rid: {
+                    "beds": inv.beds or 0,
+                    "ambulances": inv.ambulances or 0,
+                    "doctors": inv.doctors or 0,
+                    "food": inv.food or 0,
+                    "water": inv.water or 0,
+                    "medicine": inv.medicine or 0,
+                    "fire_trucks": inv.fire_trucks or 0,
+                    "rescue_team": inv.rescue_team or 0,
+                }
+                for rid, inv in context.inventories.items()
+            }
+
+            for disaster in sorted_disasters:
+                disaster_node = f"disaster_{disaster.id}"
+                if disaster_node not in context.graph:
+                    continue
+
+                edges = []
+                for _, target, data in context.graph.out_edges(disaster_node, data=True):
+                    if target.startswith("resource_"):
+                        resource_id = int(target.split("_")[1])
+                        edges.append((resource_id, data))
+
+                if not edges:
+                    continue
+
+                # Quantum-inspired scoring: weight + random perturbation scaled by gamma
+                scored_edges = []
+                for rid, edata in edges:
+                    base_weight = edata.get("weight", float("inf"))
+                    perturbation = random.gauss(0, gamma * base_weight * 0.3)
+                    quantum_score = base_weight + perturbation
+                    scored_edges.append((rid, edata, quantum_score))
+
+                scored_edges.sort(key=lambda x: x[2])
+
+                # Acceptance probability for sub-optimal choices (quantum tunneling)
+                for resource_id, edge_data, score in scored_edges:
+                    total_iterations += 1
+                    if resource_id not in available:
+                        continue
+
+                    resource = next(
+                        (r for r in context.resources if r.id == resource_id),
+                        None,
+                    )
+                    if not resource:
+                        continue
+
+                    # Quantum-inspired allocation: allocate proportional to beta
+                    allocated = {}
+                    alloc_fraction = max(0.3, math.cos(beta) ** 2)  # Born rule analog
+                    for key, amount in available[resource_id].items():
+                        if amount > 0:
+                            alloc_amount = max(1, int(amount * alloc_fraction))
+                            allocated[key] = alloc_amount
+                            available[resource_id][key] -= alloc_amount
+
+                    if allocated:
+                        allocation = ResourceAllocation(
+                            disaster_id=disaster.id,
+                            resource_center_id=resource_id,
+                            resource_type=resource.resource_type,
+                            allocated_quantity=allocated,
+                            distance_meters=edge_data.get("distance", 0),
+                            eta_seconds=edge_data.get("duration", 0),
+                            priority_score=score,
+                        )
+                        layer_allocations.append(allocation)
+                        layer_distance += allocation.distance_meters
+                        layer_time += allocation.eta_seconds
+                        break  # Allocated for this disaster
+
+            # Evaluate this layer's cost (lower = better)
+            covered = len(set(a.disaster_id for a in layer_allocations))
+            coverage = (covered / len(context.disasters)) if context.disasters else 0
+            cost = layer_distance * (1 - coverage + 0.01)  # Penalize low coverage
+
+            if cost < best_cost or (cost == best_cost and layer_distance < best_distance):
+                best_cost = cost
+                best_allocations = layer_allocations
+                best_distance = layer_distance
+                best_time = layer_time
+
+        computation_time_ms = (time.perf_counter() - start_time) * 1000
+        covered = len(set(a.disaster_id for a in best_allocations))
+        coverage = (covered / len(context.disasters) * 100) if context.disasters else 0
+
+        return OptimizationOutput(
+            allocations=best_allocations,
+            total_distance=best_distance,
+            total_time=best_time,
+            coverage_percentage=coverage,
+            unmet_demands={},
+            iterations=total_iterations,
+            computation_time_ms=computation_time_ms,
+        )
+
+
 class OptimizationService:
     """Service for running optimization algorithms."""
 
@@ -318,6 +468,7 @@ class OptimizationService:
     OPTIMIZERS: dict[OptimizationAlgorithm, type[BaseOptimizer]] = {
         OptimizationAlgorithm.GREEDY: GreedyOptimizer,
         OptimizationAlgorithm.DIJKSTRA: DijkstraOptimizer,
+        OptimizationAlgorithm.QAOA: QAOASimulatedOptimizer,
     }
 
     def __init__(self, db: Session):
@@ -451,11 +602,6 @@ class OptimizationService:
         """
         # Check if algorithm is supported
         if algorithm not in self.OPTIMIZERS:
-            if algorithm == OptimizationAlgorithm.QAOA:
-                raise OptimizationException(
-                    message="QAOA algorithm not yet implemented. "
-                    "Register a QAOA optimizer first.",
-                )
             raise OptimizationException(
                 message=f"Unknown algorithm: {algorithm}",
             )

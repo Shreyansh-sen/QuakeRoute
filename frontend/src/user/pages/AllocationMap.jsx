@@ -13,8 +13,7 @@ import {
 import { PageHeader, NodeMap, SkeletonLoader, useToast } from '@shared/components';
 import { formatNumber, formatDistance } from '@shared/utils';
 import { useDisasterStore, useAllocationStore } from '@user/store';
-import { disasterService } from '@api';
-import mockApi from '@api/mockApi';
+import { disasterService, adminService } from '@api';
 
 const AllocationMap = () => {
   const toast = useToast();
@@ -24,36 +23,53 @@ const AllocationMap = () => {
   const [resourceNodes, setResourceNodes] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [connections, setConnections] = useState([]);
+  const [optimizationData, setOptimizationData] = useState(null);
 
-  // Fetch resources
+  // Fetch real data from backend API
   const fetchResources = async () => {
-    const id = currentRequestId || requestId;
-    if (!id) {
-      setIsLoading(false);
-      return;
-    }
-
     try {
       setIsLoading(true);
-      const response = await mockApi.getResourcesForAllocation(id);
-      setResourceNodes(response.resources || []);
-      
-      // Generate connections between disasters and resources
-      const newConnections = [];
-      if (disasterNodes.length > 0 && response.resources?.length > 0) {
-        disasterNodes.forEach((disaster) => {
-          response.resources.slice(0, 3).forEach((resource) => {
-            newConnections.push({
-              disasterId: disaster.id,
-              resourceId: resource.resourceId,
-            });
-          });
-        });
+
+      // Fetch optimization results from backend
+      const optResponse = await disasterService.getOptimizationResults();
+      if (optResponse && optResponse.status === 'ready' && optResponse.result) {
+        setOptimizationData(optResponse.result);
+        const primary = optResponse.result.greedy || optResponse.result.dijkstra;
+        const result = primary ? primary.result : null;
+
+        if (result && result.allocations) {
+          // Build connections from allocations
+          const newConnections = result.allocations.map((alloc) => ({
+            disasterId: alloc.disaster_id,
+            resourceId: alloc.resource_center_id,
+            resourceType: alloc.resource_type,
+            distance: alloc.distance_meters,
+            time: alloc.travel_time_seconds,
+          }));
+          setConnections(newConnections);
+        }
       }
-      setConnections(newConnections);
+
+      // Also fetch resource centers from API
+      try {
+        const resources = await adminService.listResources();
+        const mapped = (resources || []).map((r) => ({
+          resourceId: r.id,
+          name: r.name,
+          type: r.resource_type,
+          distance: 'N/A',
+          estimatedArrival: 'N/A',
+          inventoryAvailable: Object.values(r.inventory || {}).reduce((a, b) => a + b, 0),
+          personnelAvailable: r.inventory?.doctors || r.inventory?.rescue_team || 0,
+          lat: r.latitude,
+          lng: r.longitude,
+        }));
+        setResourceNodes(mapped);
+      } catch (err) {
+        console.error('Failed to fetch resources:', err);
+      }
     } catch (error) {
-      toast.error('Failed to fetch resources');
-      console.error(error);
+      console.error('Failed to fetch allocation data:', error);
     } finally {
       setIsLoading(false);
     }

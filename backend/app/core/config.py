@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Database
     db_host: str = "localhost"
-    db_port: int = 5432
+    db_port: int = 5433
     db_name: str = "quantum_disaster"
     db_user: str = "postgres"
     db_password: str = "password"

@@ -160,14 +160,21 @@ const ReportDisaster = () => {
       
       // Handle successful response
       const createdCount = response?.count || response?.created?.length || disasterNodes.length;
+      const createdIds = response?.created?.map((d) => d.id) || [];
+      
+      // Store disaster IDs for tracking
+      if (createdIds.length > 0) {
+        setRequestId(createdIds.join(','));
+        setCurrentRequest(createdIds.join(','));
+        // Also persist in localStorage for cross-portal access
+        localStorage.setItem('quakeroute_disaster_ids', JSON.stringify(createdIds));
+        localStorage.setItem('quakeroute_disaster_nodes', JSON.stringify(disasterNodes));
+      }
       
       toast.success(`Successfully submitted ${createdCount} disaster report(s)!`);
       
-      // Clear the disaster nodes after successful submission
-      clearDisasterNodes();
-      
-      // Navigate to dashboard or stay on page
-      navigate('/');
+      // Navigate to allocation status page
+      navigate('/allocation-status');
     } catch (error) {
       console.error('Failed to submit disaster report:', error);
       
