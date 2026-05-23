@@ -537,3 +537,53 @@ class OptimizationService:
             total_duration += edge_data.get("duration", 0)
         
         return path, total_distance, total_duration
+
+    def _run_haqra(
+        self,
+        disaster_ids: list[int] | None = None,
+    ) -> OptimizationOutput:
+        """
+        Run HAQRA pipeline and convert result to OptimizationOutput
+        for compatibility with the standard optimization endpoint.
+        """
+        from app.optimization.haqra_pipeline import HAQRAPipeline
+        from app.schemas.optimize import ResourceAllocation
+
+        pipeline = HAQRAPipeline(db=self.db)
+        haqra_result = pipeline.run(disaster_ids=disaster_ids)
+
+        # Convert HAQRA allocations to standard ResourceAllocation format
+        allocations = []
+        for alloc in haqra_result.allocations:
+            allocations.append(
+                ResourceAllocation(
+                    disaster_id=alloc["disaster_id"],
+                    resource_center_id=alloc["resource_id"],
+                    resource_type=alloc["resource_type"],
+                    allocated_quantity=alloc["allocated_quantities"],
+                    distance_meters=alloc["distance_meters"],
+                    eta_seconds=alloc["eta_seconds"],
+                    priority_score=alloc["utility_score"],
+                )
+            )
+
+        total_distance = sum(r.get("total_distance_meters", 0) for r in haqra_result.routes)
+        total_time = sum(r.get("total_eta_seconds", 0) for r in haqra_result.routes)
+        covered = len(set(a["disaster_id"] for a in haqra_result.allocations))
+        # Estimate total disasters from severity_scores keys
+        total_disasters = len(haqra_result.severity_scores) or 1
+        coverage = (covered / total_disasters) * 100
+
+        return OptimizationOutput(
+            allocations=allocations,
+            total_distance=total_distance,
+            total_time=total_time,
+            coverage_percentage=coverage,
+            unmet_demands={
+                int(k): {"missing": v}
+                for k, v in haqra_result.unfulfilled_demands.items()
+            },
+            iterations=len(haqra_result.allocations),
+            computation_time_ms=haqra_result.computation_time_ms,
+        )
+
